@@ -93,6 +93,48 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
+
+class MoE(nn.Module):
+    def __init__(
+        self,
+        config,
+    ):
+        super().__init__()
+        self.experts = nn.ModuleList([MLP(config)
+                                     for _ in range(config.num_experts)])
+        self.gate = nn.Linear(config.n_embd, config.num_experts, bias=False)
+        self.num_experts_per_tok = config.num_experts_per_tok
+
+    def forward(self, x):
+        # x: (B, T, C)
+        orig_shape = x.shape
+
+        # x: (B * T, C)
+        x = x.view(-1, x.shape[-1])
+
+        # gate: (C, num_experts)
+        # scores: (B * T, num_experts)
+        # x * self.gate = x * WT
+        scores = self.gate(x)
+
+        # ew, ei: (B * T, k)
+        expert_weights, expert_indices = torch.topk(scores, self.num_experts_per_tok, dim=-1)
+        expert_weights = expert_weights.softmax(dim=-1)
+        # flat: (B * T * k)
+        flat_expert_indices = expert_indices.view(-1)
+
+        # x: (num_experts_per_tok * B * T, C)
+        x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
+        # y: (num_experts_per_tok * B * T, C)
+        y = torch.empty_like(x, dtype=torch.bfloat16, device=x.device)
+        
+        # expert(x[flat_expert_indices == i]): (num_experts_per_tok * B * T, C)
+        for i, expert in enumerate(self.experts):
+            y[flat_expert_indices == i] = expert(x[flat_expert_indices == i])
+        y = (y.view(*expert_weights.shape, -1) * expert_weights.unsqueeze(-1)).sum(dim=1)
+        return y.view(*orig_shape)
+
+
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -111,3 +153,130 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = self.ff(self.ln_2(x))
         return x
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+
+    # moe config
+    use_moe: bool = False
+    num_experts: int = 8
+    num_experts_per_tok: int = 2
+
+
+class GPT(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+
+        self.config = config
+
+        self.transformer = nn.ModuleDict(dict(
+            wte=nn.Embedding(config.vocab_size, config.n_embd),
+            wpe=nn.Embedding(config.block_size, config.n_embd),
+            drop=nn.Dropout(config.dropout),
+            h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f=LayerNorm(config.n_embd, bias=config.bias),
+        ))
+
+        # reverse embedding layer
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        self.apply(self._init_weights)
+
+        # report number of parameters
+        print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
+
+    def get_num_params(self, non_embedding=True):
+        """
+        Return the number of parameters in the model.
+        For non-embedding count (default), the position embeddings get subtracted.
+        The token embeddings would too, except due to the parameter sharing these
+        params are actually used as weights in the final layer, so we include them.
+        """
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.transformer.wpe.weight.numel()
+        return n_params
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, targets=None):
+        device = idx.device
+        b, t = idx.size()
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+
+
+        # token embeddings -> (b, t, n_embd)
+        tok_emb = self.transformer.wte(idx)
+        # position embeddings -> (t, n_embd)
+        pos_emb = self.transformer.wpe(pos)
+        x = self.transformer.drop(tok_emb + pos_emb)
+
+        for block in self.transformer.h:
+            x = block(x)
+
+        x = self.transformer.ln_f(x)
+
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(x)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x[:, [-1], :])
+            loss = None
+
+        return logits, loss
+
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        _ = device_type
+        params = [p for p in self.parameters() if p.requires_grad]
+        return torch.optim.AdamW(
+            params,
+            lr=learning_rate,
+            betas=betas,
+            weight_decay=weight_decay,
+        )
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        """
+        for _ in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(
+                1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            
+            # forward the model to get the logits for the index in the sequence
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx
