@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+from gptconfig import GPTConfig
 
 
 class LayerNorm(nn.Module):
@@ -153,22 +154,6 @@ class Block(nn.Module):
         x = x + self.attn(self.ln_1(x))
         x = self.ff(self.ln_2(x))
         return x
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = True
-
-    # moe config
-    use_moe: bool = False
-    num_experts: int = 8
-    num_experts_per_tok: int = 2
-
 
 class GPT(nn.Module):
 
