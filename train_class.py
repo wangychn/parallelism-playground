@@ -9,9 +9,12 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from model import GPTConfig, GPT
+from dataset.dataset import load_hf_dataset
 
-from train_args import parse_args
+from model.model import GPTConfig, GPT
+
+from config.train_args import parse_args
+
 
 class Trainer:
 
@@ -24,14 +27,20 @@ class Trainer:
         iter_num = 0
         best_val_loss = 1e9
 
-        
+        train_data, val_data = load_hf_dataset(args.dataset)
+        train_loader, val_loader = self.build_train_val_loaders(train_data, val_data)
+
 
     def train():
         pass
 
+    
+
     def setup_distributed(self):
         """
         various inits
+
+        TODO: FIGURE OUT WHAT THIS IS DOING AND RETYPE
         """
          
         self.ddp = int(os.environ.get("RANK", -1)) != -1
@@ -63,6 +72,8 @@ class Trainer:
     def setup_runtime(self):
         """
         sets up the backend runtime based on varaiables in setup distributed
+        
+        TODO: FIGURE OUT WHAT THIS IS DOING AND RETYPE
         """
         
         if self.master_process:
