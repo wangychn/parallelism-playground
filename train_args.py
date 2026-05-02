@@ -1,5 +1,6 @@
+from dataclasses import dataclass, asdict
+from typing import Literal
 import argparse
-
 import torch
 
 
@@ -7,6 +8,58 @@ def default_dtype():
     if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
         return "bfloat16"
     return "float16"
+
+
+DType = Literal["float32", "bfloat16", "float16"]
+Backend = Literal["nccl", "gloo"]
+
+@dataclass(slots=True)
+class TrainArgs:
+    out_dir: str
+    eval_interval: int
+    eval_iters: int
+    log_interval: int
+    eval_only: bool
+    always_save_checkpoint: bool
+
+    wandb_log: bool
+    wandb_project: str
+    wandb_run_name: str
+
+    dataset: str
+    gradient_accumulation_steps: int
+    batch_size: int
+    block_size: int
+
+    n_layer: int
+    n_head: int
+    n_embd: int
+    dropout: float
+    bias: bool
+
+    learning_rate: float
+    max_iters: int
+    weight_decay: float
+    beta1: float
+    beta2: float
+    grad_clip: float
+
+    decay_lr: bool
+    warmup_iters: int
+    lr_decay_iters: int
+    min_lr: float
+
+    distributed: bool
+    backend: Backend
+
+    device: str
+    dtype: DType
+    compile: bool
+    seed: int
+
+    use_moe: bool
+    num_experts: int
+    num_experts_per_tok: int
 
 
 def build_parser():
@@ -73,5 +126,7 @@ def build_parser():
     return parser
 
 
-def parse_args(argv=None):
-    return build_parser().parse_args(argv)
+def parse_args(argv=None) -> TrainArgs:
+    ns = build_parser().parse_args(argv)
+    return TrainArgs(**vars(ns))
+

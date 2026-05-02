@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from engine.gptconfig import GPTConfig
+from config.gptconfig import GPTConfig
 
 
 class LayerNorm(nn.Module):
