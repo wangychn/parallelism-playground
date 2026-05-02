@@ -11,7 +11,7 @@ class MoEDataset(Dataset):
 
     def __len__(self):
         return len(self.tokens) - self.block_size
-    
+
     def __getitem__(self, idx):
         x = self.tokens[idx : idx + self.block_size]
         y = self.tokens[idx + 1 : idx + 1 + self.block_size]
@@ -30,7 +30,7 @@ def to_flat_array(data, tokenizer):
         tokenized.extend(ids)
     
     return torch.tensor(tokenized, dtype=torch.long)
-        
+
 def load_hf_dataset(dataset, size=10_000):
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     train_size = int(size * 0.7)
@@ -38,8 +38,6 @@ def load_hf_dataset(dataset, size=10_000):
     match dataset:
         case "openwebtext":
             # https://huggingface.co/datasets/Skylion007/openwebtext
-
-            print(get_dataset_split_names(dataset))
 
             # https://huggingface.co/docs/datasets/en/stream
             data_iter = load_dataset(dataset, split="train", streaming=True)
@@ -61,6 +59,8 @@ def load_hf_dataset(dataset, size=10_000):
 def build_train_val_loaders(train, val, batch_size, block_size):
     """
     https://docs.pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader
+    
+    USAGE EXAMPLE
     https://docs.pytorch.org/tutorials/beginner/basics/data_tutorial.html
     """
 
@@ -75,7 +75,7 @@ def build_train_val_loaders(train, val, batch_size, block_size):
     )
 
     return train_loader, val_loader
-    
+
 
 
 if __name__ == "__main__":
@@ -84,6 +84,9 @@ if __name__ == "__main__":
 
     x, y = next(iter(tl))
 
+    print("-" * 10)
     print(x)
+    print("-" * 10)
     print(y)
+    print("-" * 10)
 
