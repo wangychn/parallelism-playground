@@ -10,7 +10,7 @@ import json
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from dataset.dataset import load_hf_dataset
+from dataset.dataset import load_hf_dataset, build_train_val_loaders
 
 from train_args import TrainArgs
 from model.model import GPTConfig, GPT
@@ -49,6 +49,9 @@ class Trainer:
         self.time_remaining_ms = 0.0
         self.total_time_est_ms = 0.0
 
+        # eval variables
+        self.eval_iters = args.eval_iters
+
         # key lr variables
         self.max_lr = args.learning_rate
         self.warmup_iters = args.warmup_iters
@@ -57,7 +60,7 @@ class Trainer:
 
 
         train_data, val_data = load_hf_dataset(args.dataset)
-        self.train_loader, self.val_loader = self.build_train_val_loaders(train_data, val_data)
+        self.train_loader, self.val_loader = build_train_val_loaders(train_data, val_data)
 
         # save full configuration used for training
         config_json = {self.args}
@@ -136,7 +139,9 @@ class Trainer:
                 lr="--",
             )
         
+            raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
             # get batch
+            # next(iter()) always get a new random batch (resets every time)
             x, y = next(iter(self.train_loader))
             local_iter_num = 0
             
@@ -146,14 +151,39 @@ class Trainer:
 
                 cur_lr = self.get_lr() if self.decay_lr else self.max_lr
                 
-
-                # increment crucial numbers
-                self.iter_num += 1
+                # periodically evaluate the loss on train/val sets
+                if self.iter_num % self.eval_interval == 0 and self.master_process:
+                    
+                    
 
                 for param_group in self.optimizer:
                     param_group['lr'] = cur_lr
 
-                pass 
+                # increment crucial numbers
+                self.iter_num += 1
+
+    @torch.no_grad()
+    def run_eval(self):
+        train_loss = None
+        val_loss = None
+        self.model.eval()
+        for split in ["train", "eval"]:
+            loader = self.train_loader if split == "train" else self.val_loader
+            losses = torch.zeros(self.eval_iters)
+            for i in range(self.eval_iters):
+                X, Y = next(iter(loader))
+                X, Y = X.to(self.device), Y.to(self.device)
+                with self.ctx: # TODO: FIGURE OUT WHAT ctx IS DOING
+                    logits, loss = self.model(X, Y)
+                    losses[i] = loss.item()
+
+                if split == "train":
+                    train_loss = losses.mean()
+                else:
+                    val_loss = losses.mean()
+    
+        return train_loss, val_loss
+
 
     def get_lr(self):
         # linear warmup
@@ -231,12 +261,12 @@ class Trainer:
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 
-        ctx = nullcontext()
+        self.ctx = nullcontext()
         if self.device_type == 'gpu':
             # note: float16 data type will automatically use a GradScaler
             # https://docs.pytorch.org/docs/2.11/amp.html -> AMP TORCH DOCS
             ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[self.dtype]
-            ctx = torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
+            self.ctx = torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
 
 
     def cleanup(self):

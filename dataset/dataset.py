@@ -66,12 +66,14 @@ def build_train_val_loaders(train, val, batch_size, block_size):
 
     train_loader = DataLoader(
         MoEDataset(train, block_size),
-        batch_size=batch_size
+        batch_size=batch_size,
+        shuffle=True
     )
 
     val_loader = DataLoader(
         MoEDataset(val, block_size),
         batch_size=batch_size
+        shuffle=True
     )
 
     return train_loader, val_loader
