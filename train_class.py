@@ -3,6 +3,8 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+import sys
+from dataclasses import asdict
 
 import numpy as np
 import torch
@@ -36,42 +38,54 @@ class Trainer:
     def __init__(self, args : TrainArgs):
         self.args = args
 
-        self.setup_distributed()
-        self.setup_runtime()
-
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
-        self.vocab_size = tokenizer.vocab_size
-
         self.iter_num = 0
         self.best_val_loss = 1e9
         self.best_iter = 0
         self.total_training_time_ms = 0.0
         self.time_remaining_ms = 0.0
         self.total_time_est_ms = 0.0
+        self.dtype = args.dtype
+        self.grad_clip = args.grad_clip
+        self.out_dir = args.out_dir
+        print(self.out_dir)
+
+        self.setup_distributed()
+        self.setup_runtime()
+
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        self.vocab_size = tokenizer.vocab_size
+
 
         # eval variables
         self.eval_iters = args.eval_iters
+        self.eval_interval = args.eval_interval
 
         # key lr variables
         self.max_lr = args.learning_rate
         self.warmup_iters = args.warmup_iters
         self.lr_decay_iters = args.lr_decay_iters
         self.min_lr = args.min_lr
-
+        self.decay_lr = args.decay_lr
 
         train_data, val_data = load_hf_dataset(args.dataset)
-        self.train_loader, self.val_loader = build_train_val_loaders(train_data, val_data)
+        self.train_loader, self.val_loader = build_train_val_loaders(
+            train_data,
+            val_data,
+            args.batch_size,
+            args.block_size,
+        )
 
         # save full configuration used for training
-        config_json = {self.args}
-        with open(self.args.out_dir + "/full_config.json", "w") as configuration_file:
+        config_json = asdict(self.args)
+        with open(self.out_dir + "/full_config.json", "w") as configuration_file:
             json.dump(config_json, configuration_file, indent=4)
-        with open(self.args.out_dir + "/best_val_loss_and_iter.txt", 'w') as file:
+        with open(self.out_dir + "/best_val_loss_and_iter.txt", 'w') as file:
             print("resetting best val loss file")
 
         # get the relevant GPT configs and put into GPT config object
         valid_keys = GPTConfig.__init__.__code__.co_varnames
-        filtered_args = {k: v for k, v in self.args.items() if k in valid_keys}
+        filtered_args = {k: v for k, v in asdict(self.args).items() if k in valid_keys}
+        filtered_args["vocab_size"] = self.vocab_size
         gptconf = GPTConfig(**filtered_args)
 
         # initialize model
@@ -83,7 +97,9 @@ class Trainer:
             args.weight_decay, 
             args.learning_rate, 
             (args.beta1, args.beta2), 
-            args.device_type)
+            args.device,
+        )
+                    
 
         # get model size
         self.model.num_param = self.model.get_num_params(non_embedding=False)
@@ -93,7 +109,13 @@ class Trainer:
             self.model = torch.compile(self.model)
         if self.ddp:
             # figure this part out
-            self.model = DDP(self.model, device_ids=[self.ddp_local_rank])
+            self.model = DDP(self.model, device_ids=[self.local_rank])
+        
+        # scaler
+        self.scaler = torch.amp.GradScaler(
+            self.device_type,
+            enabled=(self.device_type == "cuda" and self.dtype == "float16"),
+        )
 
     def train(self):
         evaluations_remaining = (self.args.max_iters - self.iter_num) // self.args.eval_interval + 1
@@ -142,37 +164,68 @@ class Trainer:
             raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
             # get batch
             # next(iter()) always get a new random batch (resets every time)
-            x, y = next(iter(self.train_loader))
+            X, Y = next(iter(self.train_loader))
+            X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
             local_iter_num = 0
             
             # ========== main training loop ===========
-
+    
             while True:
 
                 cur_lr = self.get_lr() if self.decay_lr else self.max_lr
-                
+
+                for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = cur_lr
+
                 # periodically evaluate the loss on train/val sets
                 if self.iter_num % self.eval_interval == 0 and self.master_process:
-                    
-                    
+                    train_loss, val_loss = self.run_eval()
 
-                for param_group in self.optimizer:
-                    param_group['lr'] = cur_lr
+                    print(f"step {self.iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
+
+                # mico steps for gradient accumuluation
+                for micro_step in range(self.gradient_accumulation_steps):
+                    if self.ddp:
+                        # apparently non-official to do this:
+                        # in DDP training we only need to sync gradients at the last micro step.
+                        self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
+                    with self.ctx:
+                        logits, loss = self.model(X, Y)
+                        loss = loss / self.gradient_accumulation_steps # scale the loss to account for gradient accumulation
+
+                    # async transfer of data? Overlap copying with forward
+                    # TODO: make this async in dataloader
+                    X, Y = next(iter(self.train_loader))
+                    X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
+
+                    self.scaler.scale(loss).backward()
+
+                if self.grad_clip != 0.0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+
+                # step the optimizer and scaler if training in fp16
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                # flush the gradients as soon as we can, no need for this memory anymore
+                self.optimizer.zero_grad(set_to_none=True)
 
                 # increment crucial numbers
                 self.iter_num += 1
+
+                # TODO: add logging
 
     @torch.no_grad()
     def run_eval(self):
         train_loss = None
         val_loss = None
         self.model.eval()
-        for split in ["train", "eval"]:
+        for split in ["train", "val"]:
             loader = self.train_loader if split == "train" else self.val_loader
             losses = torch.zeros(self.eval_iters)
             for i in range(self.eval_iters):
                 X, Y = next(iter(loader))
-                X, Y = X.to(self.device), Y.to(self.device)
+                X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
                 with self.ctx: # TODO: FIGURE OUT WHAT ctx IS DOING
                     logits, loss = self.model(X, Y)
                     losses[i] = loss.item()
@@ -257,17 +310,21 @@ class Trainer:
         
         if self.master_process:
             os.makedirs(self.out_dir, exist_ok=True)
-        torch.manual_seed(1337 + self.seed_offset)
+
+        torch.manual_seed(self.args.seed + self.seed_offset)
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 
         self.ctx = nullcontext()
-        if self.device_type == 'gpu':
+        if self.device_type == 'gpu' or self.device_type == 'cuda':
             # note: float16 data type will automatically use a GradScaler
             # https://docs.pytorch.org/docs/2.11/amp.html -> AMP TORCH DOCS
-            ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[self.dtype]
+            ptdtype = {
+                "float32": torch.float32,
+                "bfloat16": torch.bfloat16,
+                "float16": torch.float16,
+            }[self.dtype]
             self.ctx = torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
-
 
     def cleanup(self):
         if self.ddp:
@@ -278,8 +335,8 @@ class Trainer:
 def main():
     args = parse_args()
     print(args)
-    # trainer = Trainer(args)
-    # trainer.train()
+    trainer = Trainer(args)
+    trainer.train()
 
 if __name__ == '__main__':
     main()

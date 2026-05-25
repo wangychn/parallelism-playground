@@ -1,3 +1,4 @@
+import string
 import torch
 from dataclasses import dataclass
 
@@ -10,8 +11,12 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True
+    flash_enabled: bool = True
 
     # moe config
     use_moe: bool = False
     num_experts: int = 8
     num_experts_per_tok: int = 2
+
+    # other args
+    dtype: string = "float16"

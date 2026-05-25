@@ -127,7 +127,7 @@ class MoE(nn.Module):
         # x: (num_experts_per_tok * B * T, C)
         x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
         # y: (num_experts_per_tok * B * T, C)
-        y = torch.empty_like(x, dtype=torch.bfloat16, device=x.device)
+        y = torch.empty_like(x,  dtype=torch.bfloat16, device=x.device)
         
         # expert(x[flat_expert_indices == i]): (num_experts_per_tok * B * T, C)
         for i, expert in enumerate(self.experts):
@@ -142,12 +142,11 @@ class Block(nn.Module):
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        print(config.use_moe)
         if config.use_moe:
-            print("using mixture of experts")
+            # print("using mixture of experts")
             self.ff = MoE(config)
         else:
-            print("using regular MLP")
+            # print("using regular MLP")
             self.ff = MLP(config)
 
     def forward(self, x):

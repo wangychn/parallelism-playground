@@ -19,7 +19,6 @@ class TrainArgs:
     eval_interval: int
     eval_iters: int
     log_interval: int
-    eval_only: bool
     always_save_checkpoint: bool
 
     wandb_log: bool
@@ -36,6 +35,7 @@ class TrainArgs:
     n_embd: int
     dropout: float
     bias: bool
+    flash_enabled: bool
 
     learning_rate: float
     max_iters: int
@@ -66,11 +66,10 @@ def build_parser():
     parser = argparse.ArgumentParser(description="Training arguments for distributed MoE experiments.")
 
     io_group = parser.add_argument_group("I/O and Evaluation")
-    io_group.add_argument("--out-dir", dest="out_dir", type=str, default="out")
+    io_group.add_argument("--out-dir", dest="out_dir", type=str, default="output")
     io_group.add_argument("--eval-interval", dest="eval_interval", type=int, default=2000)
     io_group.add_argument("--eval-iters", dest="eval_iters", type=int, default=200)
     io_group.add_argument("--log-interval", dest="log_interval", type=int, default=1)
-    io_group.add_argument("--eval-only", action=argparse.BooleanOptionalAction, default=False)
     # Optional: keep checkpoint-save behavior configurable while the trainer is still being refactored.
     io_group.add_argument("--always-save-checkpoint", dest="always_save_checkpoint", action=argparse.BooleanOptionalAction, default=True)
 
@@ -92,6 +91,7 @@ def build_parser():
     model_group.add_argument("--n-embd", dest="n_embd", type=int, default=768)
     model_group.add_argument("--dropout", type=float, default=0.0)
     model_group.add_argument("--bias", action=argparse.BooleanOptionalAction, default=False)
+    model_group.add_argument("--flash-enabled", dest="flash_enabled", action=argparse.BooleanOptionalAction, default=True)
 
     optim_group = parser.add_argument_group("Optimizer")
     optim_group.add_argument("--learning-rate", dest="learning_rate", type=float, default=6e-4)
