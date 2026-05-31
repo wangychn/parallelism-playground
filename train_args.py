@@ -80,7 +80,7 @@ def build_parser():
     wandb_group.add_argument("--wandb-run-name", dest="wandb_run_name", type=str, default="gpt2")
 
     data_group = parser.add_argument_group("Data")
-    data_group.add_argument("--dataset", type=str, default="openwebtext")
+    data_group.add_argument("--dataset", type=str, default="Skylion007/openwebtext")
     data_group.add_argument("--gradient-accumulation-steps", dest="gradient_accumulation_steps", type=int, default=40)
     data_group.add_argument("--batch-size", dest="batch_size", type=int, default=12)
     data_group.add_argument("--block-size", dest="block_size", type=int, default=1024)

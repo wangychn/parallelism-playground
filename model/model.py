@@ -127,11 +127,10 @@ class MoE(nn.Module):
         # x: (num_experts_per_tok * B * T, C)
         x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
         # y: (num_experts_per_tok * B * T, C)
-        y = torch.empty_like(x, dtype=x.dtype, device=x.device)
-        
+        y = torch.empty_like(x, device=x.device)
         # expert(x[flat_expert_indices == i]): (num_experts_per_tok * B * T, C)
         for i, expert in enumerate(self.experts):
-            y[flat_expert_indices == i] = expert(x[flat_expert_indices == i]) 
+            y[flat_expert_indices == i] = expert(x[flat_expert_indices == i]).to(y.dtype)
         y = (y.view(*expert_weights.shape, -1) * expert_weights.unsqueeze(-1)).sum(dim=1)
         return y.view(*orig_shape)
 

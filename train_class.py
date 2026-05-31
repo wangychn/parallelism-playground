@@ -122,98 +122,100 @@ class Trainer:
         iter_latency_avg = 0.0
 
         self.console = Console()
-        progress = Progress(
-            TextColumn("[bold white]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeRemainingColumn(compact=False),
-            TextColumn("-- [bold dark_cyan]BestIter:[/bold dark_cyan]{task.fields[best_iter]}"),
-            TextColumn("[bold dark_cyan]BestValLoss:[/bold dark_cyan]{task.fields[best_val_loss]}"),
-            TextColumn("-- [bold purple3]ETA:[/bold purple3]{task.fields[eta]}"),
-            TextColumn("[bold purple3]Remaining:[/bold purple3]{task.fields[hour]}h{task.fields[min]}m"),
-            TextColumn("[bold purple3]TotalEst:[/bold purple3]{task.fields[total_hour]}h{task.fields[total_min]}m"),
-            TextColumn("-- [bold dark_magenta]iter_latency:[/bold dark_magenta]{task.fields[iter_latency]}ms"),
-            TextColumn("[bold dark_magenta]peak_gpu_mb:[/bold dark_magenta]{task.fields[peak_gpu_mb]}MB"),
-            TextColumn("-- [bold dark_cyan]loss:[/bold dark_cyan]{task.fields[loss]}"),
-            TextColumn("[bold dark_cyan]lr:[/bold dark_cyan]{task.fields[lr]}"),
-            console=self.console,
-        )
+        # progress = Progress(
+        #     TextColumn("[bold white]{task.description}"),
+        #     BarColumn(),
+        #     TaskProgressColumn(),
+        #     TimeRemainingColumn(compact=False),
+        #     TextColumn("-- [bold dark_cyan]BestIter:[/bold dark_cyan]{task.fields[best_iter]}"),
+        #     TextColumn("[bold dark_cyan]BestValLoss:[/bold dark_cyan]{task.fields[best_val_loss]}"),
+        #     TextColumn("-- [bold purple3]ETA:[/bold purple3]{task.fields[eta]}"),
+        #     TextColumn("[bold purple3]Remaining:[/bold purple3]{task.fields[hour]}h{task.fields[min]}m"),
+        #     TextColumn("[bold purple3]TotalEst:[/bold purple3]{task.fields[total_hour]}h{task.fields[total_min]}m"),
+        #     TextColumn("-- [bold dark_magenta]iter_latency:[/bold dark_magenta]{task.fields[iter_latency]}ms"),
+        #     TextColumn("[bold dark_magenta]peak_gpu_mb:[/bold dark_magenta]{task.fields[peak_gpu_mb]}MB"),
+        #     TextColumn("-- [bold dark_cyan]loss:[/bold dark_cyan]{task.fields[loss]}"),
+        #     TextColumn("[bold dark_cyan]lr:[/bold dark_cyan]{task.fields[lr]}"),
+        #     console=self.console,
+        # )
 
         cli_text = Text(f"CLI: {' '.join(sys.argv)}", style="chartreuse1")
 
         t_start = time.time()
         t0 = t_start
 
-        with Live(Group(progress.get_renderable(), cli_text), console=self.console, refresh_per_second=10) as live:
-            task_id = progress.add_task(
-                "[green]Training...",
-                total=(self.args.max_iters - self.iter_num) + evaluations_remaining * self.args.eval_iters,
-                eta="waiting...",
-                total_hour="--",
-                total_min="--",
-                hour="--",
-                min="--",
-                best_val_loss=f"{self.best_val_loss:.3f}",
-                best_iter=f"{self.best_iter}",
-                iter_latency=f"{iter_latency_avg:.1f}",
-                peak_gpu_mb="--",
-                loss="--",
-                lr="--",
-            )
+        # with Live(Group(progress.get_renderable(), cli_text), console=self.console, refresh_per_second=10) as live:
+        #     task_id = progress.add_task(
+        #         "[green]Training...",
+        #         total=(self.args.max_iters - self.iter_num) + evaluations_remaining * self.args.eval_iters,
+        #         eta="waiting...",
+        #         total_hour="--",
+        #         total_min="--",
+        #         hour="--",
+        #         min="--",
+        #         best_val_loss=f"{self.best_val_loss:.3f}",
+        #         best_iter=f"{self.best_iter}",
+        #         iter_latency=f"{iter_latency_avg:.1f}",
+        #         peak_gpu_mb="--",
+        #         loss="--",
+        #         lr="--",
+        #     )
         
-            raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
-            # get batch
-            # next(iter()) always get a new random batch (resets every time)
-            X, Y = next(iter(self.train_loader))
-            X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
-            local_iter_num = 0
-            
-            # ========== main training loop ===========
-    
-            while True:
+        raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
+        # get batch
+        # next(iter()) always get a new random batch (resets every time)
+        X, Y = next(iter(self.train_loader))
+        X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
+        local_iter_num = 0
+        
+        # ========== main training loop ===========
 
-                cur_lr = self.get_lr() if self.decay_lr else self.max_lr
+        while True:
 
-                for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = cur_lr
+            print(self.iter_num)
+            cur_lr = self.get_lr() if self.decay_lr else self.max_lr
 
-                # periodically evaluate the loss on train/val sets
-                if self.iter_num % self.eval_interval == 0 and self.master_process:
-                    train_loss, val_loss = self.run_eval()
+            for param_group in self.optimizer.param_groups:
+                param_group["lr"] = cur_lr
 
-                    print(f"step {self.iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
+            # periodically evaluate the loss on train/val sets
+            if self.iter_num % self.eval_interval == 0 and self.master_process:
+                print("got into eval")
+                train_loss, val_loss = self.run_eval()
 
-                # mico steps for gradient accumuluation
-                for micro_step in range(self.gradient_accumulation_steps):
-                    if self.ddp:
-                        # apparently non-official to do this:
-                        # in DDP training we only need to sync gradients at the last micro step.
-                        self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
-                    with self.ctx:
-                        logits, loss = self.model(X, Y)
-                        loss = loss / self.gradient_accumulation_steps # scale the loss to account for gradient accumulation
+                print(f"step {self.iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
 
-                    # async transfer of data? Overlap copying with forward
-                    # TODO: make this async in dataloader
-                    X, Y = next(iter(self.train_loader))
-                    X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
+            # mico steps for gradient accumuluation
+            for micro_step in range(self.gradient_accumulation_steps):
+                if self.ddp:
+                    # apparently non-official to do this:
+                    # in DDP training we only need to sync gradients at the last micro step.
+                    self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
+                with self.ctx:
+                    logits, loss = self.model(X, Y)
+                    loss = loss / self.gradient_accumulation_steps # scale the loss to account for gradient accumulation
 
-                    self.scaler.scale(loss).backward()
+                # async transfer of data? Overlap copying with forward
+                # TODO: make this async in dataloader
+                X, Y = next(iter(self.train_loader))
+                X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
 
-                if self.grad_clip != 0.0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+                self.scaler.scale(loss).backward()
 
-                # step the optimizer and scaler if training in fp16
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                # flush the gradients as soon as we can, no need for this memory anymore
-                self.optimizer.zero_grad(set_to_none=True)
+            if self.grad_clip != 0.0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
-                # increment crucial numbers
-                self.iter_num += 1
+            # step the optimizer and scaler if training in fp16
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            # flush the gradients as soon as we can, no need for this memory anymore
+            self.optimizer.zero_grad(set_to_none=True)
 
-                # TODO: add logging
+            # increment crucial numbers
+            self.iter_num += 1
+
+            # TODO: add logging
 
     @torch.no_grad()
     def run_eval(self):
@@ -222,9 +224,18 @@ class Trainer:
         self.model.eval()
         for split in ["train", "val"]:
             loader = self.train_loader if split == "train" else self.val_loader
+            print("before loader_iter")
+            loader_iter = iter(loader)
+
             losses = torch.zeros(self.eval_iters)
             for i in range(self.eval_iters):
-                X, Y = next(iter(loader))
+                print("i: ", i)
+                try:
+                    X, Y = next(loader_iter)
+                except StopIteration:
+                    loader_iter = iter(loader)
+                    X, Y = next(loader_iter)
+                
                 X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
                 with self.ctx: # TODO: FIGURE OUT WHAT ctx IS DOING
                     logits, loss = self.model(X, Y)
@@ -288,7 +299,7 @@ class Trainer:
             #   do multiple forward/backward passes and accumulate gradients before doing one optimizer step
             # Accumulation is distributed, so needs to divide evently amongst GPUs
             assert self.args.gradient_accumulation_steps % self.world_size == 0
-            self.grad_accum_steps = self.args.gradient_accumulation_steps // self.world_size
+            self.gradient_accumulation_steps = self.args.gradient_accumulation_steps // self.world_size
         else:
             self.rank = 0
             self.local_rank = 0
@@ -296,11 +307,11 @@ class Trainer:
             self.device = self.args.device
             self.master_process = True
             self.seed_offset = 0
-            self.grad_accum_steps = self.args.gradient_accumulation_steps
+            self.gradient_accumulation_steps = self.args.gradient_accumulation_steps
 
         self.device_type = 'cuda' if 'cuda' in self.device else 'cpu'
         self.tokens_per_iter = (
-            self.grad_accum_steps * self.world_size * self.args.batch_size * self.args.block_size
+            self.gradient_accumulation_steps * self.world_size * self.args.batch_size * self.args.block_size
         )
 
     def setup_runtime(self):

@@ -1,4 +1,4 @@
-from datasets import load_dataset, get_dataset_split_names
+from datasets import load_dataset
 from transformers import AutoTokenizer
 
 import torch
@@ -31,16 +31,22 @@ def to_flat_array(data, tokenizer):
     
     return torch.tensor(tokenized, dtype=torch.long)
 
+DATASET_ALIASES = {
+    "openwebtext": "Skylion007/openwebtext",
+}
+
+
 def load_hf_dataset(dataset, size=10_000):
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     train_size = int(size * 0.7)
+    dataset_name = DATASET_ALIASES.get(dataset, dataset)
 
-    match dataset:
-        case "openwebtext":
+    match dataset_name:
+        case "Skylion007/openwebtext":
             # https://huggingface.co/datasets/Skylion007/openwebtext
 
             # https://huggingface.co/docs/datasets/en/stream
-            data_iter = load_dataset(dataset, split="train", streaming=True)
+            data_iter = load_dataset(dataset_name, split="train", streaming=True)
             
             data = data_iter.take(size)
             
@@ -50,7 +56,8 @@ def load_hf_dataset(dataset, size=10_000):
             return to_flat_array(train, tokenizer), to_flat_array(val, tokenizer)
             
         case _:
-            print("Pick a supported dataset")
+            supported = ", ".join(DATASET_ALIASES)
+            raise ValueError(f"Unsupported dataset '{dataset}'. Supported datasets: {supported}")
 
 
     # return train_data, val_data

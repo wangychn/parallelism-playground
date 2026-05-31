@@ -7,7 +7,7 @@
     "wandb_log": false,
     "wandb_project": "owt",
     "wandb_run_name": "gpt2",
-    "dataset": "openwebtext",
+    "dataset": "Skylion007/openwebtext",
     "gradient_accumulation_steps": 40,
     "batch_size": 12,
     "block_size": 1024,
