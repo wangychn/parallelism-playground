@@ -113,9 +113,9 @@ def build_parser():
     dist_group.add_argument("--backend", type=str, default="nccl")
 
     system_group = parser.add_argument_group("System")
-    system_group.add_argument("--device", type=str, default="cuda")
+    system_group.add_argument("--device", type=str, default="cpu")
     system_group.add_argument("--dtype", type=str, default=default_dtype(), choices=["float32", "bfloat16", "float16"])
-    system_group.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True)
+    system_group.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
     system_group.add_argument("--seed", type=int, default=1337)
 
     moe_group = parser.add_argument_group("MoE")
