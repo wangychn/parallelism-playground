@@ -67,13 +67,22 @@ class Trainer:
         self.min_lr = args.min_lr
         self.decay_lr = args.decay_lr
 
+        # ---- dataloader building ----
+        print(f"loading dataset: {args.dataset}...")
+        data_t0 = time.time()
         train_data, val_data = load_hf_dataset(args.dataset)
+        print(
+            f"dataset tokenized in {time.time() - data_t0:.2f}s "
+            f"(train_tokens={len(train_data):,}, val_tokens={len(val_data):,})"
+        )
+
         self.train_loader, self.val_loader = build_train_val_loaders(
             train_data,
             val_data,
             args.batch_size,
             args.block_size,
         )
+        # -----------
 
         # save full configuration used for training
         config_json = asdict(self.args)
@@ -141,9 +150,6 @@ class Trainer:
 
         cli_text = Text(f"CLI: {' '.join(sys.argv)}", style="chartreuse1")
 
-        t_start = time.time()
-        t0 = t_start
-
         # with Live(Group(progress.get_renderable(), cli_text), console=self.console, refresh_per_second=10) as live:
         #     task_id = progress.add_task(
         #         "[green]Training...",
@@ -162,17 +168,15 @@ class Trainer:
         #     )
         
         raw_model = self.model.module if self.ddp else self.model # unwrap DDP container if needed
-        # get batch
-        # next(iter()) always get a new random batch (resets every time)
-        X, Y = next(iter(self.train_loader))
-        X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
-        local_iter_num = 0
         
         # ========== main training loop ===========
 
+        # grab 1st data batch
+        train_iter = iter(self.train_loader)
+
         while True:
 
-            print(self.iter_num)
+            print("training iter: ", self.iter_num)
             cur_lr = self.get_lr() if self.decay_lr else self.max_lr
 
             for param_group in self.optimizer.param_groups:
@@ -180,26 +184,37 @@ class Trainer:
 
             # periodically evaluate the loss on train/val sets
             if self.iter_num % self.eval_interval == 0 and self.master_process:
-                print("got into eval")
                 train_loss, val_loss = self.run_eval()
 
                 print(f"step {self.iter_num}: train loss {train_loss:.4f}, val loss {val_loss:.4f}")
 
+            # start timer
+            t_start = time.time()
+            t0 = t_start
+
             # mico steps for gradient accumuluation
+            loss_accum = 0
+
             for micro_step in range(self.gradient_accumulation_steps):
+                # async transfer of data; overlap copying with forward
+                try:
+                    X, Y = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(self.train_loader)
+                    X, Y = next(train_iter)
+                X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
+
+                # run model forward
                 if self.ddp:
-                    # apparently non-official to do this:
+                    # apparently "non-official" to do this:
                     # in DDP training we only need to sync gradients at the last micro step.
                     self.model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
                 with self.ctx:
                     logits, loss = self.model(X, Y)
                     loss = loss / self.gradient_accumulation_steps # scale the loss to account for gradient accumulation
+                    loss_accum += loss.detach() 
 
-                # async transfer of data? Overlap copying with forward
-                # TODO: make this async in dataloader
-                X, Y = next(iter(self.train_loader))
-                X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
-
+                # this inherently accumulated gradients
                 self.scaler.scale(loss).backward()
 
             if self.grad_clip != 0.0:
@@ -211,11 +226,31 @@ class Trainer:
             self.scaler.update()
             # flush the gradients as soon as we can, no need for this memory anymore
             self.optimizer.zero_grad(set_to_none=True)
+            
+            # ---- training printing scripts ----
+            elapsed_ms = (time.time() - t0) * 1000
+            t0 = time.time()
+            loss_value = loss_accum.detach().item()
+            if self.device_type == "cuda":
+                peak_mem_mb = torch.cuda.max_memory_allocated() / 1024**2
+                mem_text = f", peak_mem={peak_mem_mb:.0f}MB"
+            else:
+                mem_text = ""
+
+            print(
+                f"iter {self.iter_num + 1}/{self.args.max_iters} "
+                f"loss={loss_value:.4f} "
+                f"lr={cur_lr:.2e} "
+                f"time={elapsed_ms:.1f}ms"
+                f"{mem_text}"
+            )
+            # ---------
 
             # increment crucial numbers
             self.iter_num += 1
 
-            # TODO: add logging
+            if self.iter_num >= self.args.max_iters:
+                break
 
     @torch.no_grad()
     def run_eval(self):
@@ -224,12 +259,10 @@ class Trainer:
         self.model.eval()
         for split in ["train", "val"]:
             loader = self.train_loader if split == "train" else self.val_loader
-            print("before loader_iter")
             loader_iter = iter(loader)
 
-            losses = torch.zeros(self.eval_iters)
+            losses = torch.zeros(self.eval_iters, device=self.device)
             for i in range(self.eval_iters):
-                print("i: ", i)
                 try:
                     X, Y = next(loader_iter)
                 except StopIteration:
@@ -239,13 +272,14 @@ class Trainer:
                 X, Y = X.to(self.device, non_blocking=True), Y.to(self.device, non_blocking=True)
                 with self.ctx: # TODO: FIGURE OUT WHAT ctx IS DOING
                     logits, loss = self.model(X, Y)
-                    losses[i] = loss.item()
+                    losses[i] = loss
 
                 if split == "train":
-                    train_loss = losses.mean()
+                    train_loss = losses.mean().item()
                 else:
-                    val_loss = losses.mean()
+                    val_loss = losses.mean().item()
     
+        self.model.train()
         return train_loss, val_loss
 
 
